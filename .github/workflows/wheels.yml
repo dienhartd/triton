@@ -1,63 +1,77 @@
 name: build-triton-cp38-aarch64
-on: { workflow_dispatch: {} }
+on:
+  workflow_dispatch:
+    inputs:
+      triton_ref:
+        description: "Triton tag/branch/commit"
+        required: false
+        default: v3.3.0
 
 jobs:
   wheel:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 600
+    runs-on: [self-hosted, linux, arm64, arm64-big]  # labels from the runner VM
+    timeout-minutes: 360
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Triton source
+        uses: actions/checkout@v4
         with:
           repository: triton-lang/triton
           fetch-depth: 0
 
-      - name: Checkout tag v3.3.0
+      - name: Select ref
         run: |
           set -eux
-          git fetch --tags --force
-          git -c advice.detachedHead=false checkout "refs/tags/v3.3.0" || git checkout main
+          REF="${{ inputs.triton_ref }}"
+          git fetch --all --tags --force
+          if git rev-parse "refs/tags/$REF" >/dev/null 2>&1; then
+            git -c advice.detachedHead=false checkout "refs/tags/$REF"
+          elif git rev-parse "origin/$REF" >/dev/null 2>&1; then
+            git checkout "origin/$REF"
+          else
+            git checkout "$REF"
+          fi
           git submodule update --init --recursive
           git rev-parse --short HEAD
 
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/ccache
-          key: ccache-${{ runner.os }}-${{ github.sha }}
-          restore-keys: ccache-${{ runner.os }}-
-    
       - name: Build cp38 wheel in manylinux (aarch64)
         run: |
-          # heartbeat so Actions sees log activity
-          ( while true; do echo "::notice::build still running $(date -u)"; sleep 60; done ) & HB=$!
+          ( while true; do echo "::notice::build alive $(date -u)"; sleep 60; done ) & HB=$!
           docker run --rm -v "$PWD":/io -w /io/python quay.io/pypa/manylinux_2_28_aarch64 bash -lc '
             set -eux
             PYBIN=/opt/python/cp38-cp38/bin
-            $PYBIN/pip install -U pip setuptools wheel cmake ninja auditwheel
-            export CC=gcc CXX=g++ CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
-            # leaner LLVM build
+            $PYBIN/pip install -U pip setuptools wheel cmake ninja auditwheel ccache
+            export CCACHE_DIR=/io/.ccache
+            export CC="ccache gcc" CXX="ccache g++"
             export TRITON_CMAKE_FLAGS="
               -DCMAKE_BUILD_TYPE=Release
-              -DCMAKE_C_COMPILER_LAUNCHER=ccache
-              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
               -DLLVM_ENABLE_ASSERTIONS=OFF
               -DLLVM_ENABLE_PROJECTS=mlir;llvm;lld
               -DLLVM_TARGETS_TO_BUILD=AArch64;NVPTX
-              -DLLVM_INCLUDE_TESTS=OFF
-              -DLLVM_INCLUDE_EXAMPLES=OFF
+              -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF
               -DLLVM_OPTIMIZED_TABLEGEN=ON
+              -DCMAKE_C_FLAGS=-march=armv8-a -DCMAKE_CXX_FLAGS=-march=armv8-a
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
             "
-            # cap parallelism to avoid OOM on hosted ARM
-            export CMAKE_BUILD_PARALLEL_LEVEL=12
-            export NINJAFLAGS="-v -j12 -l12"
-            export MAX_JOBS=12 LLVM_PARALLEL_COMPILE_JOBS=12 LLVM_PARALLEL_LINK_JOBS=4
-            # build wheel
+            export CMAKE_BUILD_PARALLEL_LEVEL=12 LLVM_PARALLEL_COMPILE_JOBS=12 LLVM_PARALLEL_LINK_JOBS=4
+            export NINJAFLAGS="-j12 -l12 -v"
             $PYBIN/pip wheel --no-deps -w /io/wheelhouse .
             auditwheel repair /io/wheelhouse/triton-*.whl -w /io/wheelhouse
+            rm -f /io/wheelhouse/triton-*-linux_aarch64.whl || true
           '
           kill $HB || true
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: triton-aarch64-cp38
           path: wheelhouse/*.whl
           retention-days: 30
+
+      - name: Publish GitHub Release (stable URL)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: triton-cp38-aarch64-${{ github.run_number }}
+          name: Triton cp38 aarch64 ${{ github.run_number }}
+          prerelease: true
+          files: wheelhouse/*.whl
