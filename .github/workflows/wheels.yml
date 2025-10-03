@@ -15,14 +15,20 @@ jobs:
 
       - name: Build cp38 wheel in manylinux (aarch64)
         run: |
-          docker run --rm -v "$PWD":/io -w /io quay.io/pypa/manylinux_2_28_aarch64 bash -lc '
+          docker run --rm -v "$PWD":/io -w /io/python quay.io/pypa/manylinux_2_28_aarch64 bash -lc '
             set -eux
-            /opt/python/cp38-cp38/bin/pip install -U pip build cmake ninja auditwheel
+            PYBIN=/opt/python/cp38-cp38/bin
+            $PYBIN/pip install -U pip setuptools wheel cmake ninja auditwheel
+            # Keep CPU baseline generic for Jetson
             export CC=gcc CXX=g++ CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
-            /opt/python/cp38-cp38/bin/python -m build --wheel
-            auditwheel repair dist/*.whl -w wheelhouse
-            rm -rf dist
+            # Optional: keep link/compile parallelism reasonable
+            export MAX_JOBS=16 LLVM_PARALLEL_COMPILE_JOBS=16 LLVM_PARALLEL_LINK_JOBS=4
+            # Build wheel for the package in /io/python
+            $PYBIN/pip wheel --no-deps -w /io/wheelhouse .
+            # Repair to manylinux policy (bundles needed libs except glibc)
+            auditwheel repair /io/wheelhouse/triton-*.whl -w /io/wheelhouse
           '
+
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
