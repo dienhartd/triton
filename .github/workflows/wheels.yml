@@ -1,5 +1,11 @@
 name: build-triton-cp38-aarch64
-on: { workflow_dispatch: {} }
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: Number of parallel cores
+        required: false
+        default: "96"
 
 jobs:
   wheel:
@@ -24,36 +30,47 @@ jobs:
           path: ~/.cache/ccache
           key: ccache-${{ runner.os }}-${{ github.sha }}
           restore-keys: ccache-${{ runner.os }}-
-    
+
       - name: Build cp38 wheel in manylinux (aarch64)
         run: |
-          # heartbeat so Actions sees log activity
           ( while true; do echo "::notice::build still running $(date -u)"; sleep 60; done ) & HB=$!
-          docker run --rm -v "$PWD":/io -w /io/python quay.io/pypa/manylinux_2_28_aarch64 bash -lc '
-            set -eux
-            PYBIN=/opt/python/cp38-cp38/bin
-            $PYBIN/pip install -U pip setuptools wheel cmake ninja auditwheel
-            export CC=gcc CXX=g++ CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
-            # leaner LLVM build
-            export TRITON_CMAKE_FLAGS="
-              -DCMAKE_BUILD_TYPE=Release
-              -DCMAKE_C_COMPILER_LAUNCHER=ccache
-              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-              -DLLVM_ENABLE_ASSERTIONS=OFF
-              -DLLVM_ENABLE_PROJECTS=mlir;llvm;lld
-              -DLLVM_TARGETS_TO_BUILD=AArch64;NVPTX
-              -DLLVM_INCLUDE_TESTS=OFF
-              -DLLVM_INCLUDE_EXAMPLES=OFF
-              -DLLVM_OPTIMIZED_TABLEGEN=ON
-            "
-            # cap parallelism to avoid OOM on hosted ARM
-            export CMAKE_BUILD_PARALLEL_LEVEL=12
-            export NINJAFLAGS="-v -j12 -l12"
-            export MAX_JOBS=12 LLVM_PARALLEL_COMPILE_JOBS=12 LLVM_PARALLEL_LINK_JOBS=4
-            # build wheel
-            $PYBIN/pip wheel --no-deps -w /io/wheelhouse .
-            auditwheel repair /io/wheelhouse/triton-*.whl -w /io/wheelhouse
-          '
+          docker run --rm \
+            -e JOBS='${{ inputs.jobs }}' \
+            -v "$PWD":/io -w /io/python quay.io/pypa/manylinux_2_28_aarch64 bash -lc '
+              set -eux
+              PYBIN=/opt/python/cp38-cp38/bin
+              $PYBIN/pip install -U pip setuptools wheel cmake ninja auditwheel
+
+              # parallelism from input; if empty, use all cores
+              if [ -z "${JOBS:-}" ]; then
+                J=$(nproc)
+              else
+                J="$JOBS"
+              fi
+              LJ=$(( J/4 + 1 ))   # gentler for the linker
+              [ "$LJ" -lt 1 ] && LJ=1
+
+              export CC=gcc CXX=g++ CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
+              export TRITON_CMAKE_FLAGS="
+                -DCMAKE_BUILD_TYPE=Release
+                -DCMAKE_C_COMPILER_LAUNCHER=ccache
+                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+                -DLLVM_ENABLE_ASSERTIONS=OFF
+                -DLLVM_ENABLE_PROJECTS=mlir;llvm;lld
+                -DLLVM_TARGETS_TO_BUILD=AArch64;NVPTX
+                -DLLVM_INCLUDE_TESTS=OFF
+                -DLLVM_INCLUDE_EXAMPLES=OFF
+                -DLLVM_OPTIMIZED_TABLEGEN=ON
+              "
+
+              export CMAKE_BUILD_PARALLEL_LEVEL="$J"
+              export LLVM_PARALLEL_COMPILE_JOBS="$J"
+              export LLVM_PARALLEL_LINK_JOBS="$LJ"
+              export NINJAFLAGS="-v -j$J -l$J"
+
+              $PYBIN/pip wheel --no-deps -w /io/wheelhouse .
+              auditwheel repair /io/wheelhouse/triton-*.whl -w /io/wheelhouse
+            '
           kill $HB || true
 
       - uses: actions/upload-artifact@v4
