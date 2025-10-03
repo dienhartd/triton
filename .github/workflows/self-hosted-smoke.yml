@@ -1,0 +1,13 @@
+name: smoke
+on:
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: [self-hosted]   # broad match; no custom label required
+    timeout-minutes: 5
+    steps:
+      - run: |
+          echo "hello from $(hostname)"
+          echo "uname: $(uname -a)"
+          curl -sI https://api.github.com | head -n1
