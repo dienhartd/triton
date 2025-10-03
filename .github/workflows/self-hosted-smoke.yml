@@ -1,6 +1,11 @@
 name: smoke
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      triton_ref:
+        description: "Triton tag/branch/commit"
+        required: false
+        default: v3.3.0  
 
 jobs:
   ping:
