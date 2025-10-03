@@ -3,7 +3,7 @@ on: { workflow_dispatch: {} }
 
 jobs:
   smoke:
-    runs-on: [self-hosted, linux, arm64]  # or ubuntu-latest if you're testing on hosted
+    runs-on: [self-hosted, linux, arm64]
     steps:
       - name: Create a tiny artifact
         run: |
