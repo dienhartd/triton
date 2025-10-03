@@ -1,37 +1,55 @@
 name: build-triton-cp38-aarch64
-on:
-  workflow_dispatch: {}
+on: { workflow_dispatch: {} }
 
 jobs:
   wheel:
-    runs-on: ubuntu-24.04-arm   # native arm64 hosted runner
-    timeout-minutes: 240
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 600
     steps:
-      - name: Checkout Triton source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: triton-lang/triton
-          ref: v3.3.0
+          fetch-depth: 0
+
+      - name: Checkout tag v3.3.0
+        run: |
+          set -eux
+          git fetch --tags --force
+          git -c advice.detachedHead=false checkout "refs/tags/v3.3.0" || git checkout main
+          git submodule update --init --recursive
+          git rev-parse --short HEAD
 
       - name: Build cp38 wheel in manylinux (aarch64)
         run: |
+          # heartbeat so Actions sees log activity
+          ( while true; do echo "::notice::build still running $(date -u)"; sleep 60; done ) & HB=$!
           docker run --rm -v "$PWD":/io -w /io/python quay.io/pypa/manylinux_2_28_aarch64 bash -lc '
             set -eux
             PYBIN=/opt/python/cp38-cp38/bin
             $PYBIN/pip install -U pip setuptools wheel cmake ninja auditwheel
-            # Keep CPU baseline generic for Jetson
             export CC=gcc CXX=g++ CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
-            # Optional: keep link/compile parallelism reasonable
-            export MAX_JOBS=16 LLVM_PARALLEL_COMPILE_JOBS=16 LLVM_PARALLEL_LINK_JOBS=4
-            # Build wheel for the package in /io/python
+            # leaner LLVM build
+            export TRITON_CMAKE_FLAGS="
+              -DCMAKE_BUILD_TYPE=Release
+              -DLLVM_ENABLE_ASSERTIONS=OFF
+              -DLLVM_ENABLE_PROJECTS=mlir;llvm;lld
+              -DLLVM_TARGETS_TO_BUILD=AArch64;NVPTX
+              -DLLVM_INCLUDE_TESTS=OFF
+              -DLLVM_INCLUDE_EXAMPLES=OFF
+              -DLLVM_OPTIMIZED_TABLEGEN=ON
+            "
+            # cap parallelism to avoid OOM on hosted ARM
+            export CMAKE_BUILD_PARALLEL_LEVEL=12
+            export NINJAFLAGS="-v -j12 -l12"
+            export MAX_JOBS=12 LLVM_PARALLEL_COMPILE_JOBS=12 LLVM_PARALLEL_LINK_JOBS=4
+            # build wheel
             $PYBIN/pip wheel --no-deps -w /io/wheelhouse .
-            # Repair to manylinux policy (bundles needed libs except glibc)
             auditwheel repair /io/wheelhouse/triton-*.whl -w /io/wheelhouse
           '
+          kill $HB || true
 
-
-      - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: triton-aarch64-cp38
           path: wheelhouse/*.whl
+          retention-days: 30
