@@ -11,7 +11,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: triton-lang/triton
-          ref: v3.5.0           # choose the version/tag you want
+          ref: v3.3.0
 
       - name: Build cp38 wheel in manylinux (aarch64)
         run: |
