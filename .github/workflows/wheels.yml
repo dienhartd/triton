@@ -15,6 +15,7 @@ jobs:
   wheel:
     runs-on: self-hosted
     timeout-minutes: 600
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,22 +43,21 @@ jobs:
           key: ccache-${{ runner.os }}-${{ github.sha }}
           restore-keys: ccache-${{ runner.os }}-
 
-      # Optional: reclaim a little disk on the host before the big image pulls
       - name: (Optional) Prune old Docker stuff
         run: |
           sudo docker system prune -af --volumes || true
 
-      - name: Build cp38 wheel in manylinux (aarch64)
+      - name: Build cp38 wheel in CUDA-manylinux (aarch64)
         run: |
           ( while true; do echo "::notice::build still running $(date -u)"; sleep 60; done ) & HB=$!
           docker run --rm \
             -e JOBS='${{ inputs.jobs }}' \
             -e PIP_NO_CACHE_DIR=1 \
-            -v "$PWD":/io -w /io/python quay.io/pypa/manylinux_2_28_aarch64 bash -lc '
+            -e TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+            -v "$PWD":/io -w /io/python \
+            sameli/manylinux_2_28_aarch64_cuda_12.3 bash -lc '
               set -eux
               PYBIN=/opt/python/cp38-cp38/bin
-
-              # toolchain inside container
               $PYBIN/pip install -U pip setuptools wheel cmake ninja auditwheel
 
               # parallelism from input; if empty, use all cores
@@ -67,6 +67,10 @@ jobs:
                 J="$JOBS"
               fi
               LJ=$(( J/4 + 1 )); [ "$LJ" -lt 1 ] && LJ=1
+
+              # sanity: ensure ptxas exists (from CUDA in this image)
+              command -v ptxas
+              ptxas --version || true
 
               export CC=gcc CXX=g++ CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
               export TRITON_CMAKE_FLAGS="
@@ -86,8 +90,6 @@ jobs:
               # build & repair
               $PYBIN/pip wheel --no-deps -w /io/wheelhouse .
               auditwheel repair /io/wheelhouse/triton-*.whl -w /io/wheelhouse
-
-              # drop the pre-repair linux_aarch64 wheel to avoid duplicates
               rm -f /io/wheelhouse/triton-*-linux_aarch64.whl || true
 
               ls -lh /io/wheelhouse/
