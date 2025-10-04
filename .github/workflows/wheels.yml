@@ -21,7 +21,7 @@ jobs:
         run: |
           set -eux
           git fetch --tags --force
-          git -c advice.detachedHead=false checkout "refs/tags/v2.1.0" || git checkout main
+          git -c advice.detachedHead=false checkout "refs/tags/v2.1.0" || git checkout v2.1.0
           git submodule update --init --recursive
           git rev-parse --short HEAD
 
