@@ -63,23 +63,6 @@ jobs:
               # Toolchain
               $PYBIN/pip install -U pip setuptools wheel cmake ninja auditwheel
 
-              # --- GUARANTEES / DEBUG ---
-              # 1) Prove we are using the edited python/setup.py:
-              grep -n "download_and_copy_ptxas" setup.py || echo "OK: no download_and_copy_ptxas in python/setup.py"
-              # 2) Remove any stale vendored x86 ptxas from earlier runs:
-              rm -rf triton/third_party/cuda
-              # 3) Recreate path with a symlink to container ARM ptxas:
-              mkdir -p triton/third_party/cuda/bin
-              ln -sf /usr/local/cuda/bin/ptxas triton/third_party/cuda/bin/ptxas
-              # 4) Assert arch is aarch64:
-              file /usr/local/cuda/bin/ptxas
-              file triton/third_party/cuda/bin/ptxas
-              uname -m
-              ptxas --version
-
-              # Clear any stale x86 LLVM cache
-              rm -rf /root/.triton/llvm || true
-
               # --- Provide ARM LLVM 17 & make Triton use it (skip x86 download) ---
               mkdir -p /root/.triton/llvm-aarch64 && cd /root/.triton/llvm-aarch64
               for URL in \
@@ -105,6 +88,9 @@ jobs:
               # Parallelism
               if [ -z "${JOBS:-}" ]; then J=$(nproc); else J="$JOBS"; fi
               LJ=$(( J/4 + 1 )); [ "$LJ" -lt 1 ] && LJ=1
+
+              # Back to project dir to build
+              cd /io/python
 
               export CC=gcc CXX=g++ CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
               export TRITON_CMAKE_FLAGS="
