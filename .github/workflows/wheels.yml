@@ -49,7 +49,7 @@ jobs:
 
       - name: Build cp38 wheel in CUDA-manylinux (aarch64)
         run: |
-          ( while true; do echo "::notice::build still running $(date -u)"; sleep 60; end ) & HB=$!
+          ( while true; do echo "::notice::build still running $(date -u)"; sleep 60; done ) & HB=$!
           docker run --rm \
             -e JOBS='${{ inputs.jobs }}' \
             -e PIP_NO_CACHE_DIR=1 \
