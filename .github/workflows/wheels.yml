@@ -27,9 +27,10 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          path: ~/.cache/ccache
+          path: .ccache
           key: ccache-${{ runner.os }}-${{ github.sha }}
-          restore-keys: ccache-${{ runner.os }}-
+          restore-keys: |
+            ccache-${{ runner.os }}-
 
       - name: Install build deps (Ubuntu 20.04)
         run: |
@@ -44,7 +45,7 @@ jobs:
         env:
           J: ${{ inputs.jobs }}
         run: |
-          set -eux
+          set -euxo pipefail
           # heartbeat so the job stays chatty
           ( while true; do echo "::notice::build still running $(date -u)"; sleep 60; done ) & HB=$!
 
@@ -52,16 +53,21 @@ jobs:
           if [ -z "${J:-}" ]; then J=$(nproc); fi
           LJ=$(( J/4 + 1 )); [ "$LJ" -lt 1 ] && LJ=1
 
-          # Keep build tools isolated from system Python
+          # ensure defaults so set -u won't choke
+          : "${GITHUB_WORKSPACE:=$PWD}"
+          : "${HOME:=$GITHUB_WORKSPACE}"
+
+          # isolate build tools from system Python
           python3.8 -m venv .pbuild
           . .pbuild/bin/activate
 
-          # Ensure pip exists (should after venv), then toolchain
+          # Ensure pip exists (venv should have it; bootstrap just in case)
           python -m pip --version || (curl -fsSL https://bootstrap.pypa.io/pip/3.8/get-pip.py -o get-pip.py && python get-pip.py)
           python -m pip install -U pip setuptools wheel
 
-          # Speed-ups
-          export CCACHE_DIR="$HOME/.cache/ccache"
+          # Speed-ups (ccache in workspace to avoid $HOME issues)
+          mkdir -p .ccache
+          export CCACHE_DIR="$PWD/.ccache"
           export CC="ccache gcc" CXX="ccache g++"
           export CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
 
