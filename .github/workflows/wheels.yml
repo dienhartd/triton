@@ -32,15 +32,36 @@ jobs:
           restore-keys: |
             ccache-${{ runner.os }}-
 
-      - name: Install build deps (Ubuntu 20.04)
+      - name: Install build deps + CUDA repo (Ubuntu 20.04 ARM/SBSA)
         run: |
           set -eux
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake ninja-build ccache \
             python3.8 python3.8-dev python3.8-venv python3-pip \
-            git curl pkg-config \
-            nvidia-cuda-toolkit
+            git curl pkg-config ca-certificates
+
+          # Add NVIDIA CUDA SBSA repo for Ubuntu 20.04 (ARM64)
+          curl -fsSL \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/sbsa/cuda-keyring_1.1-1_all.deb \
+            -o cuda-keyring.deb
+          sudo dpkg -i cuda-keyring.deb || true
+          sudo apt-get update
+
+          # Install a package that provides ptxas (11.4 matches JP5.x era; 11.x is fine for Triton v2.1)
+          (sudo apt-get install -y cuda-toolkit-11-4) || \
+          (sudo apt-get install -y cuda-compiler-11-4) || \
+          (sudo apt-get install -y cuda-nvcc-11-4)
+
+          # Prefer CUDA 11.4 if installed; otherwise fall back to whatever /usr/local/cuda points to
+          if [ -x /usr/local/cuda-11.4/bin/ptxas ]; then
+            echo "Found ptxas at /usr/local/cuda-11.4/bin/ptxas"
+          elif [ -x /usr/local/cuda/bin/ptxas ]; then
+            echo "Found ptxas at /usr/local/cuda/bin/ptxas"
+          else
+            echo "::error ::ptxas not found after installing CUDA packages."
+            exit 1
+          fi
 
       - name: Build cp38 wheel on host (no manylinux)
         env:
@@ -58,10 +79,15 @@ jobs:
           : "${GITHUB_WORKSPACE:=$PWD}"
           : "${HOME:=$GITHUB_WORKSPACE}"
 
-          # Prefer system ptxas provided by nvidia-cuda-toolkit
-          export PATH="/usr/bin:$PATH"
-          export TRITON_PTXAS_PATH="/usr/bin/ptxas"
-          command -v ptxas >/dev/null && ptxas --version || { echo "::error ::ptxas missing after install"; exit 1; }
+          # Point PATH/CUDA_HOME at the installed CUDA so Triton can find native ARM64 ptxas
+          if [ -x /usr/local/cuda-11.4/bin/ptxas ]; then
+            export CUDA_HOME=/usr/local/cuda-11.4
+          else
+            export CUDA_HOME=/usr/local/cuda
+          fi
+          export PATH="$CUDA_HOME/bin:$PATH"
+          export TRITON_PTXAS_PATH="$CUDA_HOME/bin/ptxas"
+          command -v ptxas && ptxas --version
 
           # isolate build tools from system Python
           python3.8 -m venv .pbuild
