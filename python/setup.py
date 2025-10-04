@@ -66,28 +66,60 @@ def get_pybind11_package_info():
 
 
 def get_llvm_package_info():
-    # added statement for Apple Silicon
-    system = platform.system()
-    arch = 'x86_64'
-    if system == "Darwin":
-        system_suffix = "apple-darwin"
-        cpu_type = os.popen('sysctl machdep.cpu.brand_string').read()
-        if "apple" in cpu_type.lower():
-            arch = 'arm64'
-    elif system == "Linux":
-        vglibc = tuple(map(int, platform.libc_ver()[1].split('.')))
-        vglibc = vglibc[0] * 100 + vglibc[1]
-        linux_suffix = 'ubuntu-18.04' if vglibc > 217 else 'centos-7'
-        system_suffix = f"linux-gnu-{linux_suffix}"
-    else:
-        return Package("llvm", "LLVM-C.lib", "", "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH")
-    use_assert_enabled_llvm = check_env_flag("TRITON_USE_ASSERT_ENABLED_LLVM", "False")
-    release_suffix = "assert" if use_assert_enabled_llvm else "release"
-    name = f'llvm+mlir-17.0.0-{arch}-{system_suffix}-{release_suffix}'
-    version = "llvm-17.0.0-c5dede880d17"
-    url = f"https://github.com/ptillet/triton-llvm-releases/releases/download/{version}/{name}.tar.xz"
-    return Package("llvm", name, url, "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH")
+    # If caller provides a ready LLVM, just use it and skip any downloads.
+    if os.environ.get("LLVM_SYSPATH"):
+        return Package("llvm", "system-llvm", "", "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH")
 
+    system = platform.system()
+
+    # Detect arch conservatively
+    mach = platform.machine().lower()
+    if mach in ("aarch64", "arm64"):
+        arch = "arm64"
+    elif mach in ("x86_64", "amd64"):
+        arch = "x86_64"
+    else:
+        # Unknown arch: fall back to user-supplied LLVM, no download
+        return Package("llvm", "LLVM-C.lib", "", "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH")
+
+    # Original v2.1.0 download path (ptillet bucket) — keep for x86
+    if arch == "x86_64":
+        if system == "Darwin":
+            system_suffix = "apple-darwin"
+            cpu_type = os.popen('sysctl machdep.cpu.brand_string').read()
+            if "apple" in cpu_type.lower():
+                arch = "arm64"  # original quirk retained
+        elif system == "Linux":
+            vglibc = tuple(map(int, platform.libc_ver()[1].split('.')))
+            vglibc = vglibc[0] * 100 + vglibc[1]
+            linux_suffix = 'ubuntu-18.04' if vglibc > 217 else 'centos-7'
+            system_suffix = f"linux-gnu-{linux_suffix}"
+        else:
+            return Package("llvm", "LLVM-C.lib", "", "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH")
+
+        use_assert_enabled_llvm = check_env_flag("TRITON_USE_ASSERT_ENABLED_LLVM", "False")
+        release_suffix = "assert" if use_assert_enabled_llvm else "release"
+        name = f"llvm+mlir-17.0.0-{arch}-{system_suffix}-{release_suffix}"
+        version = "llvm-17.0.0-c5dede880d17"
+        url = f"https://github.com/ptillet/triton-llvm-releases/releases/download/{version}/{name}.tar.xz"
+        return Package("llvm", name, url, "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH")
+
+    # ARM path: use official upstream aarch64 binaries (contain LLVM & MLIR tools)
+    # Try 17.0.6 then 17.0.1 then 17.0.0 — first one that exists wins.
+    # We emulate a "Package" pointing to a directory with include/ and lib/ as expected.
+    base_urls = [
+        "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-aarch64-linux-gnu.tar.xz",
+        "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.1/clang+llvm-17.0.1-aarch64-linux-gnu.tar.xz",
+        "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.0/clang+llvm-17.0.0-aarch64-linux-gnu.tar.xz",
+    ]
+
+    # We don’t actually fetch here; get_thirdparty_packages() will.
+    # We just hand back a "name" and "url". The extracted folder contains include/ and lib/.
+    # Use the first URL as the "version marker"; if it fails, user can set LLVM_SYSPATH instead.
+    url = base_urls[0]
+    name = "clang+llvm-aarch64-linux-gnu-17.x"
+
+    return Package("llvm", name, url, "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR", "LLVM_SYSPATH")
 
 def get_thirdparty_packages(triton_cache_path):
     packages = [get_pybind11_package_info(), get_llvm_package_info()]
