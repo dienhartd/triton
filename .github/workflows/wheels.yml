@@ -32,7 +32,19 @@ jobs:
           restore-keys: |
             ccache-${{ runner.os }}-
 
-      - name: Install build deps + CUDA repo (Ubuntu 20.04 ARM/SBSA)
+      # ---- Keep work/ccache on a big volume if the runner mounted one (optional) ----
+      # If your runner user-data mounts an extra EBS/NVMe at /mnt/gha, this moves heavy files there.
+      - name: Point work dir and ccache to large volume (if present)
+        run: |
+          set -eux
+          if [ -d /mnt/gha ]; then
+            mkdir -p /mnt/gha/_work /mnt/gha/.ccache
+            # symlink only if not already re-pointed
+            [ -L _work ] || { rm -rf _work || true; ln -s /mnt/gha/_work _work; }
+            [ -L .ccache ] || { rm -rf .ccache || true; ln -s /mnt/gha/.ccache .ccache; }
+          fi
+
+      - name: Install build deps + NVIDIA CUDA SBSA repo (Ubuntu 20.04 ARM64)
         run: |
           set -eux
           sudo apt-get update
@@ -41,27 +53,43 @@ jobs:
             python3.8 python3.8-dev python3.8-venv python3-pip \
             git curl pkg-config ca-certificates
 
-          # Add NVIDIA CUDA SBSA repo for Ubuntu 20.04 (ARM64)
-          curl -fsSL \
-            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/sbsa/cuda-keyring_1.1-1_all.deb \
-            -o cuda-keyring.deb
+          # Add NVIDIA CUDA SBSA repo for Ubuntu 20.04 (arm64)
+          curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/sbsa/cuda-keyring_1.1-1_all.deb -o cuda-keyring.deb
           sudo dpkg -i cuda-keyring.deb || true
           sudo apt-get update
 
-          # Install a package that provides ptxas (11.4 matches JP5.x era; 11.x is fine for Triton v2.1)
-          (sudo apt-get install -y cuda-toolkit-11-4) || \
-          (sudo apt-get install -y cuda-compiler-11-4) || \
-          (sudo apt-get install -y cuda-nvcc-11-4)
-
-          # Prefer CUDA 11.4 if installed; otherwise fall back to whatever /usr/local/cuda points to
-          if [ -x /usr/local/cuda-11.4/bin/ptxas ]; then
-            echo "Found ptxas at /usr/local/cuda-11.4/bin/ptxas"
-          elif [ -x /usr/local/cuda/bin/ptxas ]; then
-            echo "Found ptxas at /usr/local/cuda/bin/ptxas"
-          else
-            echo "::error ::ptxas not found after installing CUDA packages."
+          # Install the SMALLEST package that provides ptxas (avoid full toolkit).
+          # Try a few versions in descending preference that are common in the SBSA repo.
+          set +e
+          for pkg in cuda-nvcc-12-2 cuda-nvcc-12-1 cuda-nvcc-11-8 cuda-nvcc-11-7 cuda-nvcc-11-4; do
+            sudo apt-get install -y "$pkg" && FOUND=1 && break
+          done
+          set -e
+          if [ "${FOUND:-0}" != "1" ]; then
+            echo "::error ::Could not install a cuda-nvcc package that provides ptxas."
             exit 1
           fi
+
+          # Pick CUDA_HOME by what was installed
+          if [ -x /usr/local/cuda-12.2/bin/ptxas ]; then
+            echo "Using CUDA 12.2"
+          elif [ -x /usr/local/cuda-12.1/bin/ptxas ]; then
+            echo "Using CUDA 12.1"
+          elif [ -x /usr/local/cuda-11.8/bin/ptxas ]; then
+            echo "Using CUDA 11.8"
+          elif [ -x /usr/local/cuda-11.7/bin/ptxas ]; then
+            echo "Using CUDA 11.7"
+          elif [ -x /usr/local/cuda-11.4/bin/ptxas ]; then
+            echo "Using CUDA 11.4"
+          elif [ -x /usr/local/cuda/bin/ptxas ]; then
+            echo "Using /usr/local/cuda"
+          else
+            echo "::error ::ptxas not found after install."
+            exit 1
+          fi
+
+          # Reclaim space (APT caches)
+          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
       - name: Build cp38 wheel on host (no manylinux)
         env:
@@ -79,12 +107,13 @@ jobs:
           : "${GITHUB_WORKSPACE:=$PWD}"
           : "${HOME:=$GITHUB_WORKSPACE}"
 
-          # Point PATH/CUDA_HOME at the installed CUDA so Triton can find native ARM64 ptxas
-          if [ -x /usr/local/cuda-11.4/bin/ptxas ]; then
-            export CUDA_HOME=/usr/local/cuda-11.4
-          else
-            export CUDA_HOME=/usr/local/cuda
-          fi
+          # Derive CUDA_HOME from available installs, prefer newest
+          if   [ -x /usr/local/cuda-12.2/bin/ptxas ]; then export CUDA_HOME=/usr/local/cuda-12.2
+          elif [ -x /usr/local/cuda-12.1/bin/ptxas ]; then export CUDA_HOME=/usr/local/cuda-12.1
+          elif [ -x /usr/local/cuda-11.8/bin/ptxas ]; then export CUDA_HOME=/usr/local/cuda-11.8
+          elif [ -x /usr/local/cuda-11.7/bin/ptxas ]; then export CUDA_HOME=/usr/local/cuda-11.7
+          elif [ -x /usr/local/cuda-11.4/bin/ptxas ]; then export CUDA_HOME=/usr/local/cuda-11.4
+          else export CUDA_HOME=/usr/local/cuda; fi
           export PATH="$CUDA_HOME/bin:$PATH"
           export TRITON_PTXAS_PATH="$CUDA_HOME/bin/ptxas"
           command -v ptxas && ptxas --version
@@ -97,7 +126,7 @@ jobs:
           python -m pip --version || (curl -fsSL https://bootstrap.pypa.io/pip/3.8/get-pip.py -o get-pip.py && python get-pip.py)
           python -m pip install -U pip setuptools wheel
 
-          # Speed-ups (ccache in workspace)
+          # Speed-ups (ccache in workspace or mounted volume)
           mkdir -p .ccache
           export CCACHE_DIR="$PWD/.ccache"
           export CC="ccache gcc" CXX="ccache g++"
