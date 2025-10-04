@@ -17,11 +17,11 @@ jobs:
           repository: triton-lang/triton
           fetch-depth: 0
 
-      - name: Checkout tag v3.3.0
+      - name: Checkout tag v2.1.0
         run: |
           set -eux
           git fetch --tags --force
-          git -c advice.detachedHead=false checkout "refs/tags/v3.3.0" || git checkout main
+          git -c advice.detachedHead=false checkout "refs/tags/v2.1.0" || git checkout v2.1.0
           git submodule update --init --recursive
           git rev-parse --short HEAD
 
