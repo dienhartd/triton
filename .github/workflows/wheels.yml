@@ -60,10 +60,10 @@ jobs:
               set -eux
               PYBIN=/opt/python/cp38-cp38/bin
 
-              # toolchain inside container
+              # Toolchain inside container
               $PYBIN/pip install -U pip setuptools wheel cmake ninja auditwheel
 
-              # use all cores unless input provided
+              # Parallelism from input; if empty, use all cores
               if [ -z "${JOBS:-}" ]; then
                 J=$(nproc)
               else
@@ -71,13 +71,9 @@ jobs:
               fi
               LJ=$(( J/4 + 1 )); [ "$LJ" -lt 1 ] && LJ=1
 
-              # ensure we are using the container's native ARM ptxas
+              # Make sure we are using the ARM ptxas that exists in the image
               command -v ptxas
-              file $(command -v ptxas) || true
-              ptxas --version || true
-
-              # make sure any stale vendored cuda dir can’t override our ptxas
-              rm -rf /io/python/triton/third_party/cuda || true
+              ptxas --version
 
               export CC=gcc CXX=g++ CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
               export TRITON_CMAKE_FLAGS="
@@ -94,11 +90,11 @@ jobs:
               export LLVM_PARALLEL_LINK_JOBS="$LJ"
               export NINJAFLAGS="-v -j$J -l$J"
 
-              # build & manylinux-repair
+              # Build & repair
               $PYBIN/pip wheel --no-deps -w /io/wheelhouse .
               auditwheel repair /io/wheelhouse/triton-*.whl -w /io/wheelhouse
 
-              # drop the pre-repair linux_aarch64 wheel to avoid duplicates
+              # Drop the pre-repair linux_aarch64 wheel to avoid duplicates
               rm -f /io/wheelhouse/triton-*-linux_aarch64.whl || true
 
               ls -lh /io/wheelhouse/
