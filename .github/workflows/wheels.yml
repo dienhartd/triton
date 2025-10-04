@@ -59,10 +59,10 @@ jobs:
             sameli/manylinux_2_28_aarch64_cuda_12.3 bash -lc '
               set -eux
               PYBIN=/opt/python/cp38-cp38/bin
-      
+
               # Toolchain
               $PYBIN/pip install -U pip setuptools wheel cmake ninja auditwheel
-      
+
               # --- GUARANTEES / DEBUG ---
               # 1) Prove we are using the edited python/setup.py:
               grep -n "download_and_copy_ptxas" setup.py || echo "OK: no download_and_copy_ptxas in python/setup.py"
@@ -76,11 +76,36 @@ jobs:
               file triton/third_party/cuda/bin/ptxas
               uname -m
               ptxas --version
-      
+
+              # Clear any stale x86 LLVM cache
+              rm -rf /root/.triton/llvm || true
+
+              # --- Provide ARM LLVM 17 & make Triton use it (skip x86 download) ---
+              mkdir -p /root/.triton/llvm-aarch64 && cd /root/.triton/llvm-aarch64
+              for URL in \
+                https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-aarch64-linux-gnu.tar.xz \
+                https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.1/clang+llvm-17.0.1-aarch64-linux-gnu.tar.xz \
+                https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.0/clang+llvm-17.0.0-aarch64-linux-gnu.tar.xz \
+              ; do
+                echo "Trying $URL"
+                if curl -fsSL "$URL" -o llvm-aarch64.tar.xz; then
+                  tar -xf llvm-aarch64.tar.xz && rm -f llvm-aarch64.tar.xz
+                  break
+                fi
+              done
+              LLVMDIR=$(echo /root/.triton/llvm-aarch64/clang+llvm-17.0.*-aarch64-linux-gnu)
+              test -d "$LLVMDIR"
+              test -x "$LLVMDIR/bin/mlir-tblgen"
+              "$LLVMDIR/bin/mlir-tblgen" --version || true
+
+              # Point Triton at this LLVM (this disables any download path)
+              export LLVM_SYSPATH="$LLVMDIR"
+              export PATH="$LLVMDIR/bin:$PATH"
+
               # Parallelism
               if [ -z "${JOBS:-}" ]; then J=$(nproc); else J="$JOBS"; fi
               LJ=$(( J/4 + 1 )); [ "$LJ" -lt 1 ] && LJ=1
-      
+
               export CC=gcc CXX=g++ CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
               export TRITON_CMAKE_FLAGS="
                 -DCMAKE_BUILD_TYPE=Release
@@ -95,7 +120,7 @@ jobs:
               export LLVM_PARALLEL_COMPILE_JOBS="$J"
               export LLVM_PARALLEL_LINK_JOBS="$LJ"
               export NINJAFLAGS="-v -j$J -l$J"
-      
+
               # Build & repair
               $PYBIN/pip wheel --no-deps -w /io/wheelhouse .
               auditwheel repair /io/wheelhouse/triton-*.whl -w /io/wheelhouse
