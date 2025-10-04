@@ -39,7 +39,8 @@ jobs:
           sudo apt-get install -y \
             build-essential cmake ninja-build ccache \
             python3.8 python3.8-dev python3.8-venv python3-pip \
-            git curl pkg-config
+            git curl pkg-config \
+            nvidia-cuda-toolkit
 
       - name: Build cp38 wheel on host (no manylinux)
         env:
@@ -57,16 +58,10 @@ jobs:
           : "${GITHUB_WORKSPACE:=$PWD}"
           : "${HOME:=$GITHUB_WORKSPACE}"
 
-          # Prefer native ARM64 ptxas (JetPack/CUDA installs it here)
-          export PATH=/usr/local/cuda/bin:$PATH
-          # Belt & suspenders: remove any vendored CUDA tools that might be wrong-arch
-          rm -rf python/triton/third_party/cuda || true
-          # Hard-fail if ptxas is missing so we don't hit an x86_64 'Exec format error'
-          if ! command -v ptxas >/dev/null 2>&1; then
-            echo "::error ::ptxas not found. Install CUDA toolkit on this runner (e.g. JetPack 5.x with CUDA 11.4) so /usr/local/cuda/bin/ptxas exists." >&2
-            exit 1
-          fi
-          ptxas --version || true
+          # Prefer system ptxas provided by nvidia-cuda-toolkit
+          export PATH="/usr/bin:$PATH"
+          export TRITON_PTXAS_PATH="/usr/bin/ptxas"
+          command -v ptxas >/dev/null && ptxas --version || { echo "::error ::ptxas missing after install"; exit 1; }
 
           # isolate build tools from system Python
           python3.8 -m venv .pbuild
@@ -76,8 +71,40 @@ jobs:
           python -m pip --version || (curl -fsSL https://bootstrap.pypa.io/pip/3.8/get-pip.py -o get-pip.py && python get-pip.py)
           python -m pip install -U pip setuptools wheel
 
-          # Speed-ups (ccache in workspace to avoid $HOME issues)
+          # Speed-ups (ccache in workspace)
           mkdir -p .ccache
           export CCACHE_DIR="$PWD/.ccache"
           export CC="ccache gcc" CXX="ccache g++"
-          export CFLAGS="-march=armv8-a" CXXFLAGS="
+          export CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
+
+          # Leaner LLVM inside Triton build
+          export TRITON_CMAKE_FLAGS="
+            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+            -DLLVM_ENABLE_ASSERTIONS=OFF
+            -DLLVM_ENABLE_PROJECTS=mlir;llvm;lld
+            -DLLVM_TARGETS_TO_BUILD=AArch64;NVPTX
+            -DLLVM_INCLUDE_TESTS=OFF
+            -DLLVM_INCLUDE_EXAMPLES=OFF
+            -DLLVM_OPTIMIZED_TABLEGEN=ON
+          "
+
+          # Parallel knobs
+          export CMAKE_BUILD_PARALLEL_LEVEL="$J"
+          export LLVM_PARALLEL_COMPILE_JOBS="$J"
+          export LLVM_PARALLEL_LINK_JOBS="$LJ"
+          export NINJAFLAGS="-v -j$J -l$J"
+
+          # Build wheel (linux_aarch64)
+          cd python
+          python -m pip wheel --no-deps -w ../wheelhouse .
+          ls -lh ../wheelhouse/*
+          kill $HB || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: triton-aarch64-cp38-ubuntu2004
+          path: wheelhouse/*-linux_aarch64.whl
+          retention-days: 30
+          compression-level: 0
