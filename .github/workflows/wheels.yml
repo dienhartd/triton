@@ -49,7 +49,7 @@ jobs:
 
       - name: Build cp38 wheel in CUDA-manylinux (aarch64)
         run: |
-          ( while true; do echo "::notice::build still running $(date -u)"; sleep 60; done ) & HB=$!
+          ( while true; do echo "::notice::build still running $(date -u)"; sleep 60; end ) & HB=$!
           docker run --rm \
             -e JOBS='${{ inputs.jobs }}' \
             -e PIP_NO_CACHE_DIR=1 \
@@ -59,22 +59,22 @@ jobs:
             sameli/manylinux_2_28_aarch64_cuda_12.3 bash -lc '
               set -eux
               PYBIN=/opt/python/cp38-cp38/bin
-
-              # Toolchain inside container
+      
+              # Toolchain in container
               $PYBIN/pip install -U pip setuptools wheel cmake ninja auditwheel
-
-              # Parallelism from input; if empty, use all cores
-              if [ -z "${JOBS:-}" ]; then
-                J=$(nproc)
-              else
-                J="$JOBS"
-              fi
+      
+              # Parallelism
+              if [ -z "${JOBS:-}" ]; then J=$(nproc); else J="$JOBS"; fi
               LJ=$(( J/4 + 1 )); [ "$LJ" -lt 1 ] && LJ=1
-
-              # Make sure we are using the ARM ptxas that exists in the image
+      
+              # Confirm container ptxas and force Triton to use it via the path it will exec
               command -v ptxas
               ptxas --version
-
+              rm -rf triton/third_party/cuda || true
+              mkdir -p triton/third_party/cuda/bin
+              ln -sf /usr/local/cuda/bin/ptxas triton/third_party/cuda/bin/ptxas
+              file triton/third_party/cuda/bin/ptxas
+      
               export CC=gcc CXX=g++ CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
               export TRITON_CMAKE_FLAGS="
                 -DCMAKE_BUILD_TYPE=Release
@@ -89,14 +89,10 @@ jobs:
               export LLVM_PARALLEL_COMPILE_JOBS="$J"
               export LLVM_PARALLEL_LINK_JOBS="$LJ"
               export NINJAFLAGS="-v -j$J -l$J"
-
-              # Build & repair
+      
               $PYBIN/pip wheel --no-deps -w /io/wheelhouse .
               auditwheel repair /io/wheelhouse/triton-*.whl -w /io/wheelhouse
-
-              # Drop the pre-repair linux_aarch64 wheel to avoid duplicates
               rm -f /io/wheelhouse/triton-*-linux_aarch64.whl || true
-
               ls -lh /io/wheelhouse/
             '
           kill $HB || true
