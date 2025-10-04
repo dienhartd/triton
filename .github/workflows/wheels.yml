@@ -60,20 +60,26 @@ jobs:
               set -eux
               PYBIN=/opt/python/cp38-cp38/bin
       
-              # Toolchain in container
+              # Toolchain
               $PYBIN/pip install -U pip setuptools wheel cmake ninja auditwheel
+      
+              # --- GUARANTEES / DEBUG ---
+              # 1) Prove we are using the edited python/setup.py:
+              grep -n "download_and_copy_ptxas" setup.py || echo "OK: no download_and_copy_ptxas in python/setup.py"
+              # 2) Remove any stale vendored x86 ptxas from earlier runs:
+              rm -rf triton/third_party/cuda
+              # 3) Recreate path with a symlink to container ARM ptxas:
+              mkdir -p triton/third_party/cuda/bin
+              ln -sf /usr/local/cuda/bin/ptxas triton/third_party/cuda/bin/ptxas
+              # 4) Assert arch is aarch64:
+              file /usr/local/cuda/bin/ptxas
+              file triton/third_party/cuda/bin/ptxas
+              uname -m
+              ptxas --version
       
               # Parallelism
               if [ -z "${JOBS:-}" ]; then J=$(nproc); else J="$JOBS"; fi
               LJ=$(( J/4 + 1 )); [ "$LJ" -lt 1 ] && LJ=1
-      
-              # Confirm container ptxas and force Triton to use it via the path it will exec
-              command -v ptxas
-              ptxas --version
-              rm -rf triton/third_party/cuda || true
-              mkdir -p triton/third_party/cuda/bin
-              ln -sf /usr/local/cuda/bin/ptxas triton/third_party/cuda/bin/ptxas
-              file triton/third_party/cuda/bin/ptxas
       
               export CC=gcc CXX=g++ CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
               export TRITON_CMAKE_FLAGS="
@@ -90,6 +96,7 @@ jobs:
               export LLVM_PARALLEL_LINK_JOBS="$LJ"
               export NINJAFLAGS="-v -j$J -l$J"
       
+              # Build & repair
               $PYBIN/pip wheel --no-deps -w /io/wheelhouse .
               auditwheel repair /io/wheelhouse/triton-*.whl -w /io/wheelhouse
               rm -f /io/wheelhouse/triton-*-linux_aarch64.whl || true
