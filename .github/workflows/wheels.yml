@@ -2,6 +2,10 @@ name: build-triton-cp38-aarch64
 on:
   workflow_dispatch:
     inputs:
+      triton_ref:
+        description: "Triton tag/branch/commit"
+        required: false
+        default: "v2.1.0"
       jobs:
         description: Number of parallel cores
         required: false
@@ -17,149 +21,81 @@ jobs:
           repository: triton-lang/triton
           fetch-depth: 0
 
-      - name: Checkout tag v2.1.0
+      - name: Select ref
         run: |
           set -eux
-          git fetch --tags --force
-          git -c advice.detachedHead=false checkout "refs/tags/v2.1.0" || git checkout v2.1.0
+          REF="${{ inputs.triton_ref }}"
+          git fetch --all --tags --force
+          if git rev-parse "refs/tags/$REF" >/dev/null 2>&1; then
+            git -c advice.detachedHead=false checkout "refs/tags/$REF"
+          elif git rev-parse "origin/$REF" >/dev/null 2>&1; then
+            git checkout "origin/$REF"
+          else
+            git checkout "$REF"
+          fi
           git submodule update --init --recursive
           git rev-parse --short HEAD
 
       - uses: actions/cache@v4
         with:
-          path: .ccache
+          path: ~/.cache/ccache
           key: ccache-${{ runner.os }}-${{ github.sha }}
-          restore-keys: |
-            ccache-${{ runner.os }}-
+          restore-keys: ccache-${{ runner.os }}-
 
-      # ---- Keep work/ccache on a big volume if the runner mounted one (optional) ----
-      # If your runner user-data mounts an extra EBS/NVMe at /mnt/gha, this moves heavy files there.
-      - name: Point work dir and ccache to large volume (if present)
+      # Optional: reclaim a little disk on the host before the big image pulls
+      - name: (Optional) Prune old Docker stuff
         run: |
-          set -eux
-          if [ -d /mnt/gha ]; then
-            mkdir -p /mnt/gha/_work /mnt/gha/.ccache
-            # symlink only if not already re-pointed
-            [ -L _work ] || { rm -rf _work || true; ln -s /mnt/gha/_work _work; }
-            [ -L .ccache ] || { rm -rf .ccache || true; ln -s /mnt/gha/.ccache .ccache; }
-          fi
+          sudo docker system prune -af --volumes || true
 
-      - name: Install build deps + NVIDIA CUDA SBSA repo (Ubuntu 20.04 ARM64)
+      - name: Build cp38 wheel in manylinux (aarch64)
         run: |
-          set -eux
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential cmake ninja-build ccache \
-            python3.8 python3.8-dev python3.8-venv python3-pip \
-            git curl pkg-config ca-certificates
-
-          # Add NVIDIA CUDA SBSA repo for Ubuntu 20.04 (arm64)
-          curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/sbsa/cuda-keyring_1.1-1_all.deb -o cuda-keyring.deb
-          sudo dpkg -i cuda-keyring.deb || true
-          sudo apt-get update
-
-          # Install the SMALLEST package that provides ptxas (avoid full toolkit).
-          # Try a few versions in descending preference that are common in the SBSA repo.
-          set +e
-          for pkg in cuda-nvcc-12-2 cuda-nvcc-12-1 cuda-nvcc-11-8 cuda-nvcc-11-7 cuda-nvcc-11-4; do
-            sudo apt-get install -y "$pkg" && FOUND=1 && break
-          done
-          set -e
-          if [ "${FOUND:-0}" != "1" ]; then
-            echo "::error ::Could not install a cuda-nvcc package that provides ptxas."
-            exit 1
-          fi
-
-          # Pick CUDA_HOME by what was installed
-          if [ -x /usr/local/cuda-12.2/bin/ptxas ]; then
-            echo "Using CUDA 12.2"
-          elif [ -x /usr/local/cuda-12.1/bin/ptxas ]; then
-            echo "Using CUDA 12.1"
-          elif [ -x /usr/local/cuda-11.8/bin/ptxas ]; then
-            echo "Using CUDA 11.8"
-          elif [ -x /usr/local/cuda-11.7/bin/ptxas ]; then
-            echo "Using CUDA 11.7"
-          elif [ -x /usr/local/cuda-11.4/bin/ptxas ]; then
-            echo "Using CUDA 11.4"
-          elif [ -x /usr/local/cuda/bin/ptxas ]; then
-            echo "Using /usr/local/cuda"
-          else
-            echo "::error ::ptxas not found after install."
-            exit 1
-          fi
-
-          # Reclaim space (APT caches)
-          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
-
-      - name: Build cp38 wheel on host (no manylinux)
-        env:
-          J: ${{ inputs.jobs }}
-        run: |
-          set -euxo pipefail
-          # heartbeat so the job stays chatty
           ( while true; do echo "::notice::build still running $(date -u)"; sleep 60; done ) & HB=$!
+          docker run --rm \
+            -e JOBS='${{ inputs.jobs }}' \
+            -e PIP_NO_CACHE_DIR=1 \
+            -v "$PWD":/io -w /io/python quay.io/pypa/manylinux_2_28_aarch64 bash -lc '
+              set -eux
+              PYBIN=/opt/python/cp38-cp38/bin
 
-          # parallelism (default to all cores)
-          if [ -z "${J:-}" ]; then J=$(nproc); fi
-          LJ=$(( J/4 + 1 )); [ "$LJ" -lt 1 ] && LJ=1
+              # toolchain inside container
+              $PYBIN/pip install -U pip setuptools wheel cmake ninja auditwheel
 
-          # ensure defaults so set -u won't choke
-          : "${GITHUB_WORKSPACE:=$PWD}"
-          : "${HOME:=$GITHUB_WORKSPACE}"
+              # parallelism from input; if empty, use all cores
+              if [ -z "${JOBS:-}" ]; then
+                J=$(nproc)
+              else
+                J="$JOBS"
+              fi
+              LJ=$(( J/4 + 1 )); [ "$LJ" -lt 1 ] && LJ=1
 
-          # Derive CUDA_HOME from available installs, prefer newest
-          if   [ -x /usr/local/cuda-12.2/bin/ptxas ]; then export CUDA_HOME=/usr/local/cuda-12.2
-          elif [ -x /usr/local/cuda-12.1/bin/ptxas ]; then export CUDA_HOME=/usr/local/cuda-12.1
-          elif [ -x /usr/local/cuda-11.8/bin/ptxas ]; then export CUDA_HOME=/usr/local/cuda-11.8
-          elif [ -x /usr/local/cuda-11.7/bin/ptxas ]; then export CUDA_HOME=/usr/local/cuda-11.7
-          elif [ -x /usr/local/cuda-11.4/bin/ptxas ]; then export CUDA_HOME=/usr/local/cuda-11.4
-          else export CUDA_HOME=/usr/local/cuda; fi
-          export PATH="$CUDA_HOME/bin:$PATH"
-          export TRITON_PTXAS_PATH="$CUDA_HOME/bin/ptxas"
-          command -v ptxas && ptxas --version
+              export CC=gcc CXX=g++ CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
+              export TRITON_CMAKE_FLAGS="
+                -DCMAKE_BUILD_TYPE=Release
+                -DLLVM_ENABLE_ASSERTIONS=OFF
+                -DLLVM_ENABLE_PROJECTS=mlir;llvm;lld
+                -DLLVM_TARGETS_TO_BUILD=AArch64;NVPTX
+                -DLLVM_INCLUDE_TESTS=OFF
+                -DLLVM_INCLUDE_EXAMPLES=OFF
+                -DLLVM_OPTIMIZED_TABLEGEN=ON
+              "
+              export CMAKE_BUILD_PARALLEL_LEVEL="$J"
+              export LLVM_PARALLEL_COMPILE_JOBS="$J"
+              export LLVM_PARALLEL_LINK_JOBS="$LJ"
+              export NINJAFLAGS="-v -j$J -l$J"
 
-          # isolate build tools from system Python
-          python3.8 -m venv .pbuild
-          . .pbuild/bin/activate
+              # build & repair
+              $PYBIN/pip wheel --no-deps -w /io/wheelhouse .
+              auditwheel repair /io/wheelhouse/triton-*.whl -w /io/wheelhouse
 
-          # Ensure pip exists (venv should have it; bootstrap just in case)
-          python -m pip --version || (curl -fsSL https://bootstrap.pypa.io/pip/3.8/get-pip.py -o get-pip.py && python get-pip.py)
-          python -m pip install -U pip setuptools wheel
+              # drop the pre-repair linux_aarch64 wheel to avoid duplicates
+              rm -f /io/wheelhouse/triton-*-linux_aarch64.whl || true
 
-          # Speed-ups (ccache in workspace or mounted volume)
-          mkdir -p .ccache
-          export CCACHE_DIR="$PWD/.ccache"
-          export CC="ccache gcc" CXX="ccache g++"
-          export CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
-
-          # Leaner LLVM inside Triton build
-          export TRITON_CMAKE_FLAGS="
-            -DCMAKE_BUILD_TYPE=Release
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-            -DLLVM_ENABLE_ASSERTIONS=OFF
-            -DLLVM_ENABLE_PROJECTS=mlir;llvm;lld
-            -DLLVM_TARGETS_TO_BUILD=AArch64;NVPTX
-            -DLLVM_INCLUDE_TESTS=OFF
-            -DLLVM_INCLUDE_EXAMPLES=OFF
-            -DLLVM_OPTIMIZED_TABLEGEN=ON
-          "
-
-          # Parallel knobs
-          export CMAKE_BUILD_PARALLEL_LEVEL="$J"
-          export LLVM_PARALLEL_COMPILE_JOBS="$J"
-          export LLVM_PARALLEL_LINK_JOBS="$LJ"
-          export NINJAFLAGS="-v -j$J -l$J"
-
-          # Build wheel (linux_aarch64)
-          cd python
-          python -m pip wheel --no-deps -w ../wheelhouse .
-          ls -lh ../wheelhouse/*
+              ls -lh /io/wheelhouse/
+            '
           kill $HB || true
 
       - uses: actions/upload-artifact@v4
         with:
-          name: triton-aarch64-cp38-ubuntu2004
-          path: wheelhouse/*-linux_aarch64.whl
+          name: triton-aarch64-cp38
+          path: wheelhouse/*.whl
           retention-days: 30
-          compression-level: 0
