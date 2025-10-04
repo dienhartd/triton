@@ -17,11 +17,11 @@ jobs:
           repository: triton-lang/triton
           fetch-depth: 0
 
-      - name: Checkout tag v3.3.0
+      - name: Checkout tag v2.1.0
         run: |
           set -eux
           git fetch --tags --force
-          git -c advice.detachedHead=false checkout "refs/tags/v3.3.0" || git checkout main
+          git -c advice.detachedHead=false checkout "refs/tags/v2.1.0" || git checkout main
           git submodule update --init --recursive
           git rev-parse --short HEAD
 
@@ -31,31 +31,41 @@ jobs:
           key: ccache-${{ runner.os }}-${{ github.sha }}
           restore-keys: ccache-${{ runner.os }}-
 
+      - name: Install build deps (Ubuntu 20.04)
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build ccache \
+            python3.8 python3.8-dev python3.8-venv python3-pip \
+            git curl pkg-config
+
       - name: Build cp38 wheel on host (no manylinux)
         env:
           J: ${{ inputs.jobs }}
         run: |
-          ( while true; do echo "::notice::build still running $(date -u)"; sleep 60; done ) & HB=$!
           set -eux
-          # deps for Ubuntu 20.04 ARM host build
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential cmake ninja-build ccache \
-            python3.8 python3.8-venv python3.8-dev \
-            git curl pkg-config
-          # parallelism from input; if empty, use all cores
-          if [ -z "${J:-}" ]; then
-            J=$(nproc)
-          fi
+          # heartbeat so the job stays chatty
+          ( while true; do echo "::notice::build still running $(date -u)"; sleep 60; done ) & HB=$!
+
+          # parallelism (default to all cores)
+          if [ -z "${J:-}" ]; then J=$(nproc); fi
           LJ=$(( J/4 + 1 )); [ "$LJ" -lt 1 ] && LJ=1
 
-          PY=python3.8
-          $PY -m pip install -U pip setuptools wheel
+          # Keep build tools isolated from system Python
+          python3.8 -m venv .pbuild
+          . .pbuild/bin/activate
 
+          # Ensure pip exists (should after venv), then toolchain
+          python -m pip --version || (curl -fsSL https://bootstrap.pypa.io/pip/3.8/get-pip.py -o get-pip.py && python get-pip.py)
+          python -m pip install -U pip setuptools wheel
+
+          # Speed-ups
           export CCACHE_DIR="$HOME/.cache/ccache"
           export CC="ccache gcc" CXX="ccache g++"
           export CFLAGS="-march=armv8-a" CXXFLAGS="-march=armv8-a"
 
+          # Leaner LLVM inside Triton build
           export TRITON_CMAKE_FLAGS="
             -DCMAKE_BUILD_TYPE=Release
             -DCMAKE_C_COMPILER_LAUNCHER=ccache
@@ -67,13 +77,16 @@ jobs:
             -DLLVM_INCLUDE_EXAMPLES=OFF
             -DLLVM_OPTIMIZED_TABLEGEN=ON
           "
+
+          # Parallel knobs
           export CMAKE_BUILD_PARALLEL_LEVEL="$J"
           export LLVM_PARALLEL_COMPILE_JOBS="$J"
           export LLVM_PARALLEL_LINK_JOBS="$LJ"
           export NINJAFLAGS="-v -j$J -l$J"
 
+          # Build wheel (linux_aarch64)
           cd python
-          $PY -m pip wheel --no-deps -w ../wheelhouse .
+          python -m pip wheel --no-deps -w ../wheelhouse .
           ls -lh ../wheelhouse/*
           kill $HB || true
 
