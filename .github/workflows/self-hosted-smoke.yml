@@ -1,0 +1,21 @@
+name: smoke
+on: { workflow_dispatch: {} }
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, linux, arm64]
+    steps:
+      - name: Create a tiny artifact
+        run: |
+          mkdir -p artifacts
+          echo "runner: $RUNNER_NAME"    > artifacts/smoke.txt
+          echo "run id: $GITHUB_RUN_ID" >> artifacts/smoke.txt
+          echo "ts: $(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> artifacts/smoke.txt
+          echo "ok" >> artifacts/smoke.txt
+
+      - name: Upload smoke artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ github.run_number }}
+          path: artifacts/smoke.txt
+          retention-days: 7
